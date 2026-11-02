@@ -35,6 +35,11 @@
       "inicio": "2026-12-09",
       "fim": "2027-01-03",
       "motivo": "viagem de fim de ano"
+    },
+    {
+      "inicio": "2026-11-02",
+      "fim": "2026-11-02",
+      "motivo": "desmarcada manualmente pelo Jaime"
     }
   ]
 }
