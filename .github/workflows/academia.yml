@@ -22,6 +22,9 @@ on:
         required: false
         default: "false"
  
+permissions:
+  contents: write   # para o robô gravar o estado.json (aulas já marcadas / desmarcadas)
+
 concurrency:
   group: academia-bot
   cancel-in-progress: false
@@ -66,6 +69,17 @@ jobs:
           NOTIFY_ERRORS: ${{ github.event.inputs.notify_errors || 'false' }}
           TESTE_WHATSAPP: ${{ github.event.inputs.teste_whatsapp || 'false' }}
         run: python bot.py
+
+      - name: Salvar estado (aulas marcadas / desmarcadas)
+        if: always()
+        run: |
+          if [ -f estado.json ] && [ -n "$(git status --porcelain estado.json)" ]; then
+            git config user.name "bot-academia"
+            git config user.email "bot-academia@users.noreply.github.com"
+            git add estado.json
+            git commit -m "Atualiza estado das aulas"
+            for i in 1 2 3; do git pull --rebase -q origin main && git push -q origin HEAD:main && break; sleep 5; done
+          fi
  
       - name: Guardar prints de erro
         if: always()

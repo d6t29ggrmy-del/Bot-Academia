@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v1.8 — respeita aulas desmarcadas manualmente (não remarca) e apaga o evento do calendário
 v1.7 — lista de espera também no calendário ("Lista de Espera" no título); corrige formato do telefone do WhatsApp
 
 O que faz, a cada execução:
@@ -48,6 +49,24 @@ DEBUG_DIR.mkdir(exist_ok=True)
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 SKIP_CALENDAR = os.getenv("SKIP_CALENDAR", "false").lower() == "true"
 NOTIFY_ERRORS = os.getenv("NOTIFY_ERRORS", "false").lower() == "true"
+
+ESTADO_PATH = ROOT / "estado.json"
+
+
+def carregar_estado():
+    """estado.json guarda, por aula+data, quem o robô já viu inscrito/na espera ("vistos")
+    e quem desmarcou manualmente ("desmarcados"), para nunca remarcar essas pessoas."""
+    try:
+        return json.loads(ESTADO_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def salvar_estado(estado, today):
+    limite = (today - timedelta(days=7)).strftime("%Y%m%d")
+    estado = {k: v for k, v in estado.items() if k.rsplit("-", 1)[-1] >= limite}
+    ESTADO_PATH.write_text(json.dumps(estado, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
 
 WEEKDAYS_PT = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 MONTHS = {m: i for i, m in enumerate(
@@ -228,9 +247,14 @@ def get_description(page):
         return ""
 
 
-def ensure_members(page, button_index, label_for_log, waitlist=False):
+def ensure_members(page, button_index, label_for_log, waitlist=False, info=None):
     """Abre a janela da data e inscreve os membros que faltam (ou os coloca na lista de espera).
-    Retorna (novos, todos_ok)."""
+    info = {"vistos": [...], "desmarcados": [...]} do estado.json; é atualizado aqui.
+    Quem já foi visto inscrito e agora não está = desmarcou manualmente: não é reinscrito.
+    Retorna (novos, todos_ok, presentes)."""
+    if info is None:
+        info = {"vistos": [], "desmarcados": []}
+    presentes = []
     btn = page.locator("button.register_button").nth(button_index)
     opened = False
     for tentativa in range(3):  # a janela às vezes demora; tenta até 3 vezes
@@ -257,9 +281,18 @@ def ensure_members(page, button_index, label_for_log, waitlist=False):
         cls = item.get_attribute("class") or ""
         if "registered" in cls.split():
             log(f"  {name}: já inscrito")
+            presentes.append(name)
             continue
-        if waitlist and "waitlisted" in cls.split():
+        if "waitlisted" in cls.split():
             log(f"  {name}: já está na lista de espera")
+            presentes.append(name)
+            continue
+        if name in info["desmarcados"]:
+            log(f"  {name}: desmarcou manualmente — não reinscrever")
+            continue
+        if name in info["vistos"]:
+            log(f"  {name}: estava inscrito e agora não está — desmarcação manual, não reinscrever")
+            info["desmarcados"].append(name)
             continue
         if DRY_RUN:
             log(f"  {name}: seria {'colocado na lista de espera' if waitlist else 'inscrito'} (DRY_RUN)")
@@ -282,12 +315,12 @@ def ensure_members(page, button_index, label_for_log, waitlist=False):
     if not newly:
         page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
         time.sleep(1)
-        return [], True
+        return [], True, presentes
 
     if DRY_RUN:
         page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
         time.sleep(1)
-        return newly, False
+        return newly, False, presentes + newly
 
     botao = r"^\s*Add to Waitlist\s*$" if waitlist else r"^\s*Register\s*$"
     confirmacao = "text=/added to the waitlist/i" if waitlist else "text=/registration is complete/i"
@@ -302,7 +335,7 @@ def ensure_members(page, button_index, label_for_log, waitlist=False):
     except Exception:
         pass
     time.sleep(1)
-    return newly, True
+    return newly, True, presentes + newly
 
 
 # ---------------------------------------------------------------- calendário
@@ -395,6 +428,8 @@ def main():
     log(f"Início — DRY_RUN={DRY_RUN} — horizonte até {horizon:%d/%m/%Y}")
 
     booked, problems, to_calendar, waitlisted = [], [], [], []
+    estado = carregar_estado()
+    to_remove = []  # (c, d, start) — todos desmarcaram: apagar evento do calendário
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -436,8 +471,10 @@ def main():
                         if idx is None:
                             problems.append(f"{label}: linha sumiu da página")
                             continue
+                        chave = f"{c['event_id']}-{d:%Y%m%d}"
+                        info = estado.setdefault(chave, {"vistos": [], "desmarcados": []})
                         try:
-                            newly, all_in = ensure_members(page, idx, label)
+                            newly, all_in, presentes = ensure_members(page, idx, label, info=info)
                         except WindowNotOpened as e:
                             if "register-button-registered" in r["cls"]:
                                 # já aparece como inscrito: não é problema, segue para o calendário
@@ -453,7 +490,12 @@ def main():
                             continue
                         if newly:
                             booked.append((label, newly))
-                        if all_in or DRY_RUN:
+                        if not DRY_RUN:
+                            info["vistos"] = sorted(set(info["vistos"]) | set(presentes))
+                        if not presentes:
+                            if info["desmarcados"]:
+                                to_remove.append((c, d, start))
+                        elif all_in or DRY_RUN:
                             to_calendar.append((c, d, start, end, description, False))
                     elif "register-button-waitlist" in r["cls"] or re.search(r"waitlist", status, re.I):
                         open_event(page, c["event_id"])
@@ -462,8 +504,10 @@ def main():
                         if idx is None:
                             problems.append(f"{label}: linha sumiu da página")
                             continue
+                        chave = f"{c['event_id']}-{d:%Y%m%d}"
+                        info = estado.setdefault(chave, {"vistos": [], "desmarcados": []})
                         try:
-                            newly, all_ok = ensure_members(page, idx, label, waitlist=True)
+                            newly, all_ok, presentes = ensure_members(page, idx, label, waitlist=True, info=info)
                         except WindowNotOpened as e:
                             log(f"    aviso: {e} (lista de espera)")
                             continue
@@ -473,7 +517,12 @@ def main():
                             continue
                         if newly:
                             waitlisted.append((label, newly))
-                        if all_ok or DRY_RUN:
+                        if not DRY_RUN:
+                            info["vistos"] = sorted(set(info["vistos"]) | set(presentes))
+                        if not presentes:
+                            if info["desmarcados"]:
+                                to_remove.append((c, d, start))
+                        elif all_ok or DRY_RUN:
                             to_calendar.append((c, d, start, end, description, True))
                     elif "full" in r["cls"].lower() or re.search(r"full", status, re.I):
                         log("    lotada, sem lista de espera — nada a fazer")
@@ -485,6 +534,22 @@ def main():
             traceback.print_exc()
         finally:
             browser.close()
+
+    if not DRY_RUN:
+        salvar_estado(estado, today)
+
+    # ----- calendário: aulas desmarcadas por todos → apagar eventos
+    if to_remove and not SKIP_CALENDAR and not DRY_RUN:
+        try:
+            cal_rm = Calendar()
+            for c, d, start in to_remove:
+                for uid in (f"academia-{c['event_id']}-{d:%Y%m%d}@academia-bot",
+                            f"academia-espera-{c['event_id']}-{d:%Y%m%d}@academia-bot"):
+                    if cal_rm.delete_uid(uid):
+                        log(f"  calendário: removido {c['name']} {fmt_pt(d, start)} (aula desmarcada)")
+        except Exception as e:
+            problems.append(f"Calendário (remoção): {e}")
+            traceback.print_exc()
 
     # ----- calendário
     created = []
