@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v1.9 — calendário pela situação real de cada um (inscrito x lista de espera); aviso quando só um de vocês está inscrito
 v1.8 — respeita aulas desmarcadas manualmente (não remarca) e apaga o evento do calendário
 v1.7 — lista de espera também no calendário ("Lista de Espera" no título); corrige formato do telefone do WhatsApp
 
@@ -251,10 +252,10 @@ def ensure_members(page, button_index, label_for_log, waitlist=False, info=None)
     """Abre a janela da data e inscreve os membros que faltam (ou os coloca na lista de espera).
     info = {"vistos": [...], "desmarcados": [...]} do estado.json; é atualizado aqui.
     Quem já foi visto inscrito e agora não está = desmarcou manualmente: não é reinscrito.
-    Retorna (novos, todos_ok, presentes)."""
+    Retorna (novos, todos_ok, presentes, inscritos) — inscritos = quem tem vaga confirmada."""
     if info is None:
         info = {"vistos": [], "desmarcados": []}
-    presentes = []
+    presentes, inscritos = [], []
     btn = page.locator("button.register_button").nth(button_index)
     opened = False
     for tentativa in range(3):  # a janela às vezes demora; tenta até 3 vezes
@@ -282,6 +283,7 @@ def ensure_members(page, button_index, label_for_log, waitlist=False, info=None)
         if "registered" in cls.split():
             log(f"  {name}: já inscrito")
             presentes.append(name)
+            inscritos.append(name)
             continue
         if "waitlisted" in cls.split():
             log(f"  {name}: já está na lista de espera")
@@ -315,12 +317,12 @@ def ensure_members(page, button_index, label_for_log, waitlist=False, info=None)
     if not newly:
         page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
         time.sleep(1)
-        return [], True, presentes
+        return [], True, presentes, inscritos
 
     if DRY_RUN:
         page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
         time.sleep(1)
-        return newly, False, presentes + newly
+        return newly, False, presentes + newly, inscritos + ([] if waitlist else newly)
 
     botao = r"^\s*Add to Waitlist\s*$" if waitlist else r"^\s*Register\s*$"
     confirmacao = "text=/added to the waitlist/i" if waitlist else "text=/registration is complete/i"
@@ -335,7 +337,7 @@ def ensure_members(page, button_index, label_for_log, waitlist=False, info=None)
     except Exception:
         pass
     time.sleep(1)
-    return newly, True, presentes + newly
+    return newly, True, presentes + newly, inscritos + ([] if waitlist else newly)
 
 
 # ---------------------------------------------------------------- calendário
@@ -363,6 +365,17 @@ class Calendar:
             return True
         except Exception:
             return False
+
+    def summary(self, uid):
+        """Título do evento com esse UID, ou None se não existir."""
+        try:
+            ev = self.cal.event_by_uid(uid)
+        except Exception:
+            return None
+        data = re.sub(r"\r?\n[ \t]", "", ev.data or "")  # junta linhas dobradas do iCalendar
+        m = re.search(r"^SUMMARY[^:]*:(.*)$", data, re.M | re.I)
+        t = m.group(1).strip() if m else ""
+        return t.replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
 
     def exists(self, uid, start, end, title, waitlist=False):
         try:
@@ -418,6 +431,17 @@ class Calendar:
 
 
 # ---------------------------------------------------------------- principal
+def tipo_evento(presentes, inscritos):
+    """Decide o evento do calendário pela situação de cada um (e não pela cor do botão da aula):
+    ok = todos os presentes com vaga; parcial = um com vaga e outro na espera; espera = ninguém com vaga."""
+    na_espera = [n for n in presentes if n not in inscritos]
+    if not inscritos:
+        return "espera", [], na_espera
+    if na_espera:
+        return "parcial", list(inscritos), na_espera
+    return "ok", list(inscritos), []
+
+
 def main():
     if os.getenv("TESTE_WHATSAPP", "false").lower() == "true":
         log("Teste de WhatsApp (só para o Jaime)")
@@ -474,12 +498,12 @@ def main():
                         chave = f"{c['event_id']}-{d:%Y%m%d}"
                         info = estado.setdefault(chave, {"vistos": [], "desmarcados": []})
                         try:
-                            newly, all_in, presentes = ensure_members(page, idx, label, info=info)
+                            newly, all_in, presentes, inscritos = ensure_members(page, idx, label, info=info)
                         except WindowNotOpened as e:
                             if "register-button-registered" in r["cls"]:
                                 # já aparece como inscrito: não é problema, segue para o calendário
                                 log(f"    aviso: {e} — mas a aula já consta como Registered")
-                                to_calendar.append((c, d, start, end, description, False))
+                                to_calendar.append((c, d, start, end, description, "ok", [], []))
                             else:
                                 problems.append(f"{label}: {e}")
                                 shot(page, "erro-inscricao")
@@ -496,7 +520,7 @@ def main():
                             if info["desmarcados"]:
                                 to_remove.append((c, d, start))
                         elif all_in or DRY_RUN:
-                            to_calendar.append((c, d, start, end, description, False))
+                            to_calendar.append((c, d, start, end, description, *tipo_evento(presentes, inscritos)))
                     elif "register-button-waitlist" in r["cls"] or re.search(r"waitlist", status, re.I):
                         open_event(page, c["event_id"])
                         rows_now = read_rows(page)
@@ -507,9 +531,11 @@ def main():
                         chave = f"{c['event_id']}-{d:%Y%m%d}"
                         info = estado.setdefault(chave, {"vistos": [], "desmarcados": []})
                         try:
-                            newly, all_ok, presentes = ensure_members(page, idx, label, waitlist=True, info=info)
+                            newly, all_ok, presentes, inscritos = ensure_members(page, idx, label, waitlist=True, info=info)
                         except WindowNotOpened as e:
                             log(f"    aviso: {e} (lista de espera)")
+                            if re.search(r"^\s*Registered\s*$", status, re.I):
+                                to_calendar.append((c, d, start, end, description, "ok", [], []))
                             continue
                         except Exception as e:
                             problems.append(f"{label} (lista de espera): {e}")
@@ -523,7 +549,7 @@ def main():
                             if info["desmarcados"]:
                                 to_remove.append((c, d, start))
                         elif all_ok or DRY_RUN:
-                            to_calendar.append((c, d, start, end, description, True))
+                            to_calendar.append((c, d, start, end, description, *tipo_evento(presentes, inscritos)))
                     elif "full" in r["cls"].lower() or re.search(r"full", status, re.I):
                         log("    lotada, sem lista de espera — nada a fazer")
                     else:
@@ -552,13 +578,19 @@ def main():
             traceback.print_exc()
 
     # ----- calendário
-    created = []
+    created, separados = [], []
     if to_calendar and not SKIP_CALENDAR:
         try:
             cal = None if DRY_RUN else Calendar()
-            for c, d, start, end, description, espera in to_calendar:
-                title = (f"⏳ Lista de Espera — {c['name']} @ Walmart" if espera
-                         else f"{c['name']} @ Walmart")
+            for c, d, start, end, description, tipo, com_vaga, na_espera in to_calendar:
+                espera = tipo == "espera"
+                if espera:
+                    title = f"⏳ Lista de Espera — {c['name']} @ Walmart"
+                elif tipo == "parcial":
+                    title = (f"⚠️ {c['name']} @ Walmart — só {' e '.join(com_vaga)} inscrito"
+                             f" ({' e '.join(na_espera)} na espera)")
+                else:
+                    title = f"{c['name']} @ Walmart"
                 s, e = to_dt(d, start), to_dt(d, end)
                 uid_ok = f"academia-{c['event_id']}-{d:%Y%m%d}@academia-bot"
                 uid_espera = f"academia-espera-{c['event_id']}-{d:%Y%m%d}@academia-bot"
@@ -568,9 +600,18 @@ def main():
                     continue
                 if not espera and cal.delete_uid(uid_espera):
                     log(f"  calendário: removido o evento de lista de espera de {c['name']} {fmt_pt(d, start)} (vaga confirmada)")
-                if cal.exists(uid, s, e, title, waitlist=espera):
+                if espera and cal.delete_uid(uid_ok):
+                    log(f"  calendário: removido o evento confirmado de {c['name']} {fmt_pt(d, start)} (voltou para a lista de espera)")
+                atual = cal.summary(uid)
+                if atual is not None and atual != title:
+                    cal.delete_uid(uid)  # título mudou (ex.: ⚠️ só um inscrito → os dois inscritos): recria
+                    log(f"  calendário: atualizando título de {c['name']} {fmt_pt(d, start)}")
+                elif cal.exists(uid, s, e, title, waitlist=espera):
                     log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
                     continue
+                if tipo == "parcial":
+                    separados.append(f"{c['name']} {fmt_pt(d, start)} — só {' e '.join(com_vaga)} inscrito; "
+                                     f"{' e '.join(na_espera)} continua na lista de espera")
                 cal.create(uid, s, e, title, description)
                 created.append(f"{title} {fmt_pt(d, start)}")
                 log(f"  calendário: criado {title} {fmt_pt(d, start)}")
@@ -579,6 +620,9 @@ def main():
             traceback.print_exc()
 
     # ----- avisos
+    if separados:
+        whatsapp("⚠️ BOT ACADEMIA — vocês não estão juntos na aula\n" + "\n".join(separados)
+                 + "\nDecidam se vão assim, se esperam a outra vaga ou se desmarcam no app.")
     if waitlisted:
         lines = ["⏳ BOT ACADEMIA — lista de espera" + (" (teste)" if DRY_RUN else "")]
         for label, names in waitlisted:
