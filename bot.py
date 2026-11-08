@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.2 — atualiza também eventos achados pelo horário (sem o UID do robô)
 v2.1 — quem cancelou sai do evento do calendário (a Ana deixa de ser convidada); cancelar segue com a rodada normal
 v2.0 — função "Cancelar aulas": cancela inscrições no portal sob pedido (entrada "cancelar" do workflow)
 v1.9 — calendário pela situação real de cada um (inscrito x lista de espera); aviso quando só um de vocês está inscrito
@@ -401,6 +402,38 @@ class Calendar:
         except Exception as e:
             log(f"  busca no calendário falhou ({e}); vou criar mesmo assim")
         return False
+
+    def find(self, uid, start, end, title, waitlist=False):
+        """Acha o evento pelo UID do robô ou, se não houver, pelo horário + nome da aula."""
+        try:
+            return self.cal.event_by_uid(uid)
+        except Exception:
+            pass
+        try:
+            for ev in self.cal.search(start=start - timedelta(minutes=1), end=end + timedelta(minutes=1),
+                                      event=True, expand=False):
+                summary = self.titulo(ev).lower()
+                if ("lista de espera" in summary) != waitlist:
+                    continue
+                base_name = title.replace("⏳ Lista de Espera — ", "").replace("⚠️ ", "").split(" @ ")[0].split(" (")[0]
+                if base_name.lower() in summary:
+                    return ev
+        except Exception as e:
+            log(f"  busca no calendário falhou ({e})")
+        return None
+
+    @staticmethod
+    def _data(ev):
+        return re.sub(r"\r?\n[ \t]", "", ev.data or "")
+
+    def titulo(self, ev):
+        m = re.search(r"^SUMMARY[^:]*:(.*)$", self._data(ev), re.M | re.I)
+        t = m.group(1).strip() if m else ""
+        return t.replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
+
+    def convida_ana(self, ev):
+        ana = os.getenv("ANA_EMAIL", "").strip().lower()
+        return bool(ana) and ("mailto:" + ana) in self._data(ev).lower()
 
     def tem_ana(self, uid):
         """True se o evento com esse UID tem a Ana Elisa como convidada (None se não existir)."""
@@ -827,14 +860,14 @@ def main():
                     log(f"  calendário: removido o evento de lista de espera de {c['name']} {fmt_pt(d, start)} (vaga confirmada)")
                 if espera and cal.delete_uid(uid_ok):
                     log(f"  calendário: removido o evento confirmado de {c['name']} {fmt_pt(d, start)} (voltou para a lista de espera)")
-                atual = cal.summary(uid)
-                if atual is not None and (atual != title or cal.tem_ana(uid) != convidar_ana):
-                    cal.delete_uid(uid)  # título ou convidados mudaram: recria
+                ev = cal.find(uid, s, e, title, waitlist=espera)
+                if ev is not None:
+                    if cal.titulo(ev) == title and cal.convida_ana(ev) == convidar_ana:
+                        log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
+                        continue
+                    ev.delete()  # título ou convidados mudaram: recria
                     log(f"  calendário: atualizando {c['name']} {fmt_pt(d, start)}"
                         + ("" if convidar_ana else " (sem a Ana Elisa)"))
-                elif cal.exists(uid, s, e, title, waitlist=espera):
-                    log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
-                    continue
                 if tipo == "parcial":
                     separados.append(f"{c['name']} {fmt_pt(d, start)} — só {' e '.join(com_vaga)} inscrito; "
                                      f"{' e '.join(na_espera)} continua na lista de espera")
