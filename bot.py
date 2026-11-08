@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.1 — quem cancelou sai do evento do calendário (a Ana deixa de ser convidada); cancelar segue com a rodada normal
 v2.0 — função "Cancelar aulas": cancela inscrições no portal sob pedido (entrada "cancelar" do workflow)
 v1.9 — calendário pela situação real de cada um (inscrito x lista de espera); aviso quando só um de vocês está inscrito
 v1.8 — respeita aulas desmarcadas manualmente (não remarca) e apaga o evento do calendário
@@ -401,7 +402,17 @@ class Calendar:
             log(f"  busca no calendário falhou ({e}); vou criar mesmo assim")
         return False
 
-    def create(self, uid, start, end, title, description):
+    def tem_ana(self, uid):
+        """True se o evento com esse UID tem a Ana Elisa como convidada (None se não existir)."""
+        try:
+            ev = self.cal.event_by_uid(uid)
+        except Exception:
+            return None
+        ana = os.getenv("ANA_EMAIL", "").strip().lower()
+        data = re.sub(r"\r?\n[ \t]", "", ev.data or "").lower()
+        return bool(ana) and ("mailto:" + ana) in data
+
+    def create(self, uid, start, end, title, description, convidar_ana=True):
         def esc(s):
             return s.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
         utc = ZoneInfo("UTC")
@@ -420,7 +431,7 @@ class Calendar:
             "X-APPLE-TRAVEL-ADVISORY-BEHAVIOR:AUTOMATIC",
             f"ORGANIZER;CN=Jaime:{self.organizer}",
         ]
-        if ana:
+        if ana and convidar_ana:
             lines.append(f"ATTENDEE;CN=Ana Elisa;CUTYPE=INDIVIDUAL;ROLE=REQ-PARTICIPANT;"
                          f"PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{ana}")
         lines += [
@@ -627,7 +638,7 @@ def cancelar(pedidos):
     log(f"Fim do cancelamento — feitos: {len(feitos)}, falhas: {len(falhas)}")
     if falhas:
         log("FALHAS:\n  " + "\n  ".join(falhas))
-        sys.exit(1)
+    return falhas
 
 
 # ---------------------------------------------------------------- principal
@@ -650,14 +661,16 @@ def main():
     if os.getenv("DIAGNOSTICO", "false").lower() == "true":
         diagnostico()
         return
+    falhas_cancelar = []
     if os.getenv("CANCELAR", "").strip():
-        cancelar(json.loads(os.environ["CANCELAR"]))
-        return
+        falhas_cancelar = cancelar(json.loads(os.environ["CANCELAR"]))
+        log("Seguindo com a rodada normal para acertar o calendário")
     today = datetime.now(TZ).date()
     horizon = today + timedelta(days=CFG["horizon_days"])
     log(f"Início — DRY_RUN={DRY_RUN} — horizonte até {horizon:%d/%m/%Y}")
 
     booked, problems, to_calendar, waitlisted = [], [], [], []
+    problems += [f"Cancelamento: {f}" for f in falhas_cancelar]
     estado = carregar_estado()
     to_remove = []  # (c, d, start) — todos desmarcaram: apagar evento do calendário
 
@@ -797,8 +810,12 @@ def main():
                 elif tipo == "parcial":
                     title = (f"⚠️ {c['name']} @ Walmart — só {' e '.join(com_vaga)} inscrito"
                              f" ({' e '.join(na_espera)} na espera)")
+                elif com_vaga == ["Ana Elisa"]:
+                    title = f"{c['name']} @ Walmart — só Ana Elisa"
                 else:
                     title = f"{c['name']} @ Walmart"
+                # a Ana só é convidada se ela estiver na aula (inscrita ou na espera)
+                convidar_ana = (not com_vaga and not na_espera) or "Ana Elisa" in (com_vaga + na_espera)
                 s, e = to_dt(d, start), to_dt(d, end)
                 uid_ok = f"academia-{c['event_id']}-{d:%Y%m%d}@academia-bot"
                 uid_espera = f"academia-espera-{c['event_id']}-{d:%Y%m%d}@academia-bot"
@@ -811,16 +828,17 @@ def main():
                 if espera and cal.delete_uid(uid_ok):
                     log(f"  calendário: removido o evento confirmado de {c['name']} {fmt_pt(d, start)} (voltou para a lista de espera)")
                 atual = cal.summary(uid)
-                if atual is not None and atual != title:
-                    cal.delete_uid(uid)  # título mudou (ex.: ⚠️ só um inscrito → os dois inscritos): recria
-                    log(f"  calendário: atualizando título de {c['name']} {fmt_pt(d, start)}")
+                if atual is not None and (atual != title or cal.tem_ana(uid) != convidar_ana):
+                    cal.delete_uid(uid)  # título ou convidados mudaram: recria
+                    log(f"  calendário: atualizando {c['name']} {fmt_pt(d, start)}"
+                        + ("" if convidar_ana else " (sem a Ana Elisa)"))
                 elif cal.exists(uid, s, e, title, waitlist=espera):
                     log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
                     continue
                 if tipo == "parcial":
                     separados.append(f"{c['name']} {fmt_pt(d, start)} — só {' e '.join(com_vaga)} inscrito; "
                                      f"{' e '.join(na_espera)} continua na lista de espera")
-                cal.create(uid, s, e, title, description)
+                cal.create(uid, s, e, title, description, convidar_ana=convidar_ana)
                 created.append(f"{title} {fmt_pt(d, start)}")
                 log(f"  calendário: criado {title} {fmt_pt(d, start)}")
         except Exception as e:
