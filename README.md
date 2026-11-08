@@ -1,4 +1,4 @@
-# Bot Academia — reservas automáticas (v1.9)
+# Bot Academia — reservas automáticas (v2.0)
 
 Robô que reserva as aulas do Jaime e da Ana Elisa na Walton Family Whole Health & Fitness,
 cria o evento no calendário "Academia" do iCloud (com convite para a Ana Elisa) e avisa no WhatsApp.
@@ -88,6 +88,15 @@ mesmo para quem já está inscrito):
 O robô guarda em `estado.json` quem ele já viu inscrito em cada aula e data. Se você ou a Ana Elisa desmarcarem
 uma aula pelo app/site, ele percebe que a pessoa saiu e **não remarca**. Se ninguém mais estiver inscrito naquela data,
 o evento do calendário "Academia" é apagado. Para voltar a marcar uma aula desmarcada, é só se inscrever de novo pelo app.
+
+## Cancelar aulas pelo Claude
+
+No Claude, escreva **"Cancelar aulas"**. O Claude mostra as próximas aulas marcadas, pergunta (com opções para clicar)
+quais e para quem, confirma com você e aciona o robô com a entrada `cancelar`. O robô clica em **Unregister** no portal,
+marca a aula como desmarcada (não remarca), apaga o evento do calendário quando os dois saem e avisa no WhatsApp.
+
+Também dá para acionar à mão: **Actions → Run workflow**, campo `cancelar`, por exemplo
+`[{"event_id":624023,"data":"2026-11-09","membros":["Jaime","Ana Elisa"]}]` (com `dry_run = true` ele só simula).
 
 ## Pausas (viagens)
 
