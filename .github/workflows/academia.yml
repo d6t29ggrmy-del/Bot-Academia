@@ -17,6 +17,10 @@ on:
         description: "Avisar erro na hora pelo WhatsApp (true/false)"
         required: false
         default: "true"
+      cancelar:
+        description: 'Cancelar aulas (JSON), ex.: [{"event_id":624023,"data":"2026-11-09","membros":["Jaime","Ana Elisa"]}]'
+        required: false
+        default: ""
       diagnostico:
         description: "Diagnostico so leitura da janela de inscricao (true/false)"
         required: false
@@ -73,6 +77,7 @@ jobs:
           NOTIFY_ERRORS: ${{ github.event.inputs.notify_errors || 'false' }}
           TESTE_WHATSAPP: ${{ github.event.inputs.teste_whatsapp || 'false' }}
           DIAGNOSTICO: ${{ github.event.inputs.diagnostico || 'false' }}
+          CANCELAR: ${{ github.event.inputs.cancelar || '' }}
         run: python bot.py
 
       - name: Salvar estado (aulas marcadas / desmarcadas)

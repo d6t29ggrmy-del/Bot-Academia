@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.0 — função "Cancelar aulas": cancela inscrições no portal sob pedido (entrada "cancelar" do workflow)
 v1.9 — calendário pela situação real de cada um (inscrito x lista de espera); aviso quando só um de vocês está inscrito
 v1.8 — respeita aulas desmarcadas manualmente (não remarca) e apaga o evento do calendário
 v1.7 — lista de espera também no calendário ("Lista de Espera" no título); corrige formato do telefone do WhatsApp
@@ -477,6 +478,158 @@ def diagnostico():
             browser.close()
 
 
+# ---------------------------------------------------------------- cancelar aulas (sob pedido)
+def _abrir_janela(page, c, d):
+    """Abre a janela de inscrição da aula c na data d. Retorna True se abriu."""
+    open_event(page, c["event_id"])
+    today = datetime.now(TZ).date()
+    for r in read_rows(page):
+        parsed = parse_row_date(r["text"], today)
+        if not parsed or parsed[0] != d or parsed[1] != c["start"].lower():
+            continue
+        btn = page.locator("button.register_button").nth(r["i"])
+        for _ in range(3):
+            try:
+                btn.scroll_into_view_if_needed()
+                btn.click()
+                page.wait_for_selector("div.select-member:visible", timeout=20000)
+                time.sleep(1)
+                return True
+            except PWTimeout:
+                page.keyboard.press("Escape")
+                time.sleep(3)
+    return False
+
+
+def _membro(page, name):
+    return page.locator("div.select-member:visible").filter(
+        has_text=re.compile(rf"^\s*{re.escape(name)}\b")).first
+
+
+def _botoes_visiveis(page):
+    return page.evaluate("""() => [...document.querySelectorAll('a, button, input[type=button], input[type=submit]')]
+        .filter(e => e.offsetParent !== null)
+        .map(e => e.tagName + '.' + e.className + ' [' + (e.innerText || e.value || '').trim().slice(0, 40) + ']')
+        .filter(t => !/\\[\\]$/.test(t)).slice(-30)""")
+
+
+def cancelar(pedidos):
+    """pedidos = [{"event_id": 624023, "data": "2026-11-09", "membros": ["Jaime", "Ana Elisa"]}, ...]
+    Cancela no portal, marca como desmarcado no estado.json (para não remarcar),
+    ajusta o calendário e avisa no WhatsApp."""
+    log(f"Cancelar aulas — pedidos: {json.dumps(pedidos, ensure_ascii=False)}")
+    estado = carregar_estado()
+    today = datetime.now(TZ).date()
+    feitos, falhas, apagar = [], [], []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1300, "height": 1000})
+        page.set_default_timeout(30000)
+        page.on("dialog", lambda dlg: (log(f"  confirmação do site: {dlg.message!r} → OK"), dlg.accept()))
+        try:
+            login(page)
+            for ped in pedidos:
+                c = next((x for x in CFG["classes"] if str(x["event_id"]) == str(ped["event_id"])), None)
+                if not c:
+                    falhas.append(f"aula {ped['event_id']} não está no config.json")
+                    continue
+                d = date.fromisoformat(ped["data"])
+                label = f"{c['name']} {fmt_pt(d, c['start'].lower())}"
+                chave = f"{c['event_id']}-{d:%Y%m%d}"
+                info = estado.setdefault(chave, {"vistos": [], "desmarcados": []})
+                for name in ped["membros"]:
+                    if name not in info["desmarcados"]:
+                        info["desmarcados"].append(name)  # mesmo se falhar, o robô não remarca
+                cancelados = []
+                for name in ped["membros"]:
+                    if not _abrir_janela(page, c, d):
+                        falhas.append(f"{label}: não consegui abrir a janela da aula")
+                        shot(page, "cancelar-janela")
+                        break
+                    item = _membro(page, name)
+                    cls = (item.get_attribute("class") or "").split() if item.count() else []
+                    if "registered" not in cls and "waitlisted" not in cls:
+                        log(f"  {label} — {name}: já não estava inscrito nem na espera")
+                        cancelados.append(name)
+                        page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
+                        continue
+                    link = item.locator("a.unregister-link, a", has_text=re.compile(
+                        r"unregister|remove|leave|cancel", re.I)).first
+                    if link.count() == 0:
+                        falhas.append(f"{label} — {name}: não achei o link Unregister")
+                        log("  HTML: " + item.evaluate("e => e.outerHTML")[:1500])
+                        shot(page, "cancelar-sem-link")
+                        continue
+                    if DRY_RUN:
+                        log(f"  {label} — {name}: seria cancelado (DRY_RUN)")
+                        page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
+                        cancelados.append(name)
+                        continue
+                    link.click()
+                    page.wait_for_load_state("networkidle")
+                    time.sleep(2)
+                    log("  depois do Unregister, botões visíveis: " + " | ".join(_botoes_visiveis(page)))
+                    # confirmação dentro da página (se houver)
+                    conf = page.locator("a:visible, button:visible, input:visible", has_text=re.compile(
+                        r"^\s*(Yes|OK|Confirm|Unregister|Continue)\b", re.I))
+                    try:
+                        for k in range(conf.count()):
+                            el = conf.nth(k)
+                            if "unregister-link" in (el.get_attribute("class") or ""):
+                                continue
+                            log(f"  clicando na confirmação: {el.inner_text().strip()[:30]}")
+                            el.click()
+                            page.wait_for_load_state("networkidle")
+                            time.sleep(2)
+                            break
+                    except Exception as e:
+                        log(f"  aviso na confirmação: {e}")
+                    # verificação: reabre a janela e confere o nome
+                    page.keyboard.press("Escape")
+                    if _abrir_janela(page, c, d):
+                        cls2 = (_membro(page, name).get_attribute("class") or "").split()
+                        page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
+                        if "registered" in cls2 or "waitlisted" in cls2:
+                            falhas.append(f"{label} — {name}: o site ainda mostra a inscrição")
+                            shot(page, "cancelar-nao-confirmou")
+                            continue
+                    log(f"  {label} — {name}: cancelado ✔")
+                    cancelados.append(name)
+                if cancelados:
+                    feitos.append((label, cancelados))
+                restantes = [n for n in CFG["members"] if n not in info["desmarcados"]]
+                if not restantes or set(cancelados) >= set(CFG["members"]):
+                    apagar.append((c, d))
+        except Exception as e:
+            shot(page, "cancelar-erro")
+            falhas.append(f"Erro geral: {e}")
+            traceback.print_exc()
+        finally:
+            browser.close()
+    if not DRY_RUN:
+        salvar_estado(estado, today)
+    if apagar and not DRY_RUN and not SKIP_CALENDAR:
+        try:
+            cal = Calendar()
+            for c, d in apagar:
+                for uid in (f"academia-{c['event_id']}-{d:%Y%m%d}@academia-bot",
+                            f"academia-espera-{c['event_id']}-{d:%Y%m%d}@academia-bot"):
+                    if cal.delete_uid(uid):
+                        log(f"  calendário: removido {c['name']} {d:%d/%m}")
+        except Exception as e:
+            falhas.append(f"Calendário: {e}")
+    linhas = ["❌ BOT ACADEMIA — aula cancelada" + (" (teste)" if DRY_RUN else "")]
+    linhas += [f"🗓️ {label} — {' e '.join(nomes)}" for label, nomes in feitos]
+    if falhas:
+        linhas.append("⚠️ Não consegui: " + "; ".join(falhas[:4]))
+    if (feitos or falhas) and not DRY_RUN:
+        whatsapp("\n".join(linhas))
+    log(f"Fim do cancelamento — feitos: {len(feitos)}, falhas: {len(falhas)}")
+    if falhas:
+        log("FALHAS:\n  " + "\n  ".join(falhas))
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------- principal
 def tipo_evento(presentes, inscritos):
     """Decide o evento do calendário pela situação de cada um (e não pela cor do botão da aula):
@@ -496,6 +649,9 @@ def main():
         return
     if os.getenv("DIAGNOSTICO", "false").lower() == "true":
         diagnostico()
+        return
+    if os.getenv("CANCELAR", "").strip():
+        cancelar(json.loads(os.environ["CANCELAR"]))
         return
     today = datetime.now(TZ).date()
     horizon = today + timedelta(days=CFG["horizon_days"])
@@ -566,6 +722,7 @@ def main():
                             booked.append((label, newly))
                         if not DRY_RUN:
                             info["vistos"] = sorted(set(info["vistos"]) | set(presentes))
+                            info["situacao"] = {n: ("inscrito" if n in inscritos else "espera") for n in presentes}
                         if not presentes:
                             if info["desmarcados"]:
                                 to_remove.append((c, d, start))
@@ -595,6 +752,7 @@ def main():
                             waitlisted.append((label, newly))
                         if not DRY_RUN:
                             info["vistos"] = sorted(set(info["vistos"]) | set(presentes))
+                            info["situacao"] = {n: ("inscrito" if n in inscritos else "espera") for n in presentes}
                         if not presentes:
                             if info["desmarcados"]:
                                 to_remove.append((c, d, start))
