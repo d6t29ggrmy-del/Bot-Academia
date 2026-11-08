@@ -863,7 +863,9 @@ def main():
                 ev = cal.find(uid, s, e, title, waitlist=espera)
                 if ev is not None:
                     if cal.titulo(ev) == title and cal.convida_ana(ev) == convidar_ana:
-                        log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
+                        att = [re.sub(r"mailto:([^@]{0,3})[^@]*@", r"mailto:\1***@", l, flags=re.I)[:160]
+                               for l in cal._data(ev).splitlines() if l.upper().startswith(("ATTENDEE", "ORGANIZER", "UID"))]
+                        log(f"  calendário: já existe {title} {fmt_pt(d, start)} — convidar_ana={convidar_ana} | " + " || ".join(att))
                         continue
                     ev.delete()  # título ou convidados mudaram: recria
                     log(f"  calendário: atualizando {c['name']} {fmt_pt(d, start)}"
