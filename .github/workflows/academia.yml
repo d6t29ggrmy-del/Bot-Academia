@@ -17,6 +17,10 @@ on:
         description: "Avisar erro na hora pelo WhatsApp (true/false)"
         required: false
         default: "true"
+      diagnostico:
+        description: "Diagnostico so leitura da janela de inscricao (true/false)"
+        required: false
+        default: "false"
       teste_whatsapp:
         description: "So enviar uma mensagem de teste no WhatsApp (true/false)"
         required: false
@@ -68,6 +72,7 @@ jobs:
           SKIP_CALENDAR: ${{ github.event.inputs.skip_calendar || 'false' }}
           NOTIFY_ERRORS: ${{ github.event.inputs.notify_errors || 'false' }}
           TESTE_WHATSAPP: ${{ github.event.inputs.teste_whatsapp || 'false' }}
+          DIAGNOSTICO: ${{ github.event.inputs.diagnostico || 'false' }}
         run: python bot.py
 
       - name: Salvar estado (aulas marcadas / desmarcadas)

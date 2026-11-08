@@ -430,6 +430,53 @@ class Calendar:
         self.cal.save_event("\r\n".join(lines))
 
 
+# ---------------------------------------------------------------- diagnóstico (só leitura)
+def diagnostico():
+    """Abre a janela de uma aula em que vocês já estão inscritos e registra no log como ela é,
+    sem clicar em nenhum nome nem confirmar nada (usado para preparar a função de cancelar)."""
+    log("Diagnóstico — só leitura, nada será alterado")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1300, "height": 1000})
+        page.set_default_timeout(30000)
+        try:
+            login(page)
+            for c in CFG["classes"]:
+                open_event(page, c["event_id"])
+                rows = read_rows(page)
+                alvo = next((r for r in rows if re.search(r"^\s*Registered\s*$", r["label"], re.I)), None)
+                if not alvo:
+                    continue
+                log(f"Aula {c['name']}: linha '{alvo['text'][:80]}' cls='{alvo['cls']}'")
+                btn = page.locator("button.register_button").nth(alvo["i"])
+                btn.scroll_into_view_if_needed()
+                btn.click()
+                page.wait_for_selector("div.select-member:visible", timeout=20000)
+                time.sleep(2)
+                html = page.evaluate("""() => {
+                    const m = document.querySelector('div.select-member');
+                    let el = m;
+                    for (let k = 0; k < 8 && el && el.parentElement; k++) {
+                        el = el.parentElement;
+                        if (el.matches('.modal, .ui-dialog, [role=dialog], .popup, .dialog')) break;
+                    }
+                    return (el || m).outerHTML.replace(/\\s+/g, ' ');
+                }""")
+                for k in range(0, min(len(html), 12000), 1500):
+                    log("HTML " + html[k:k + 1500])
+                vis = page.evaluate("""() => [...document.querySelectorAll('a, button')]
+                    .filter(e => e.offsetParent !== null)
+                    .map(e => e.tagName + '.' + e.className + ' [' + e.innerText.trim().slice(0, 40) + ']')
+                    .filter(t => !/\\[\\]$/.test(t)).slice(-40)""")
+                log("Botões visíveis: " + " | ".join(vis))
+                shot(page, "diagnostico-janela")
+                page.locator("a:visible", has_text=re.compile(r"^\s*Cancel\s*$")).first.click()
+                log("Janela fechada com Cancel, sem alterações")
+                break
+        finally:
+            browser.close()
+
+
 # ---------------------------------------------------------------- principal
 def tipo_evento(presentes, inscritos):
     """Decide o evento do calendário pela situação de cada um (e não pela cor do botão da aula):
@@ -446,6 +493,9 @@ def main():
     if os.getenv("TESTE_WHATSAPP", "false").lower() == "true":
         log("Teste de WhatsApp (só para o Jaime)")
         whatsapp("🧪 BOT ACADEMIA — teste de WhatsApp. Se você recebeu esta mensagem, o envio está funcionando.", only_jaime=True)
+        return
+    if os.getenv("DIAGNOSTICO", "false").lower() == "true":
+        diagnostico()
         return
     today = datetime.now(TZ).date()
     horizon = today + timedelta(days=CFG["horizon_days"])
