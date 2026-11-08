@@ -432,8 +432,13 @@ class Calendar:
         return t.replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\")
 
     def convida_ana(self, ev):
+        # o iCloud reescreve o convidado (EMAIL=... e endereço interno), então olha nome e e-mail
         ana = os.getenv("ANA_EMAIL", "").strip().lower()
-        return bool(ana) and ("mailto:" + ana) in self._data(ev).lower()
+        for l in self._data(ev).splitlines():
+            u = l.lower()
+            if u.startswith("attendee") and ((ana and ana in u) or 'cn="ana elisa"' in u or "cn=ana elisa" in u):
+                return True
+        return False
 
     def tem_ana(self, uid):
         """True se o evento com esse UID tem a Ana Elisa como convidada (None se não existir)."""
@@ -863,9 +868,7 @@ def main():
                 ev = cal.find(uid, s, e, title, waitlist=espera)
                 if ev is not None:
                     if cal.titulo(ev) == title and cal.convida_ana(ev) == convidar_ana:
-                        att = [re.sub(r"mailto:([^@]{0,3})[^@]*@", r"mailto:\1***@", l, flags=re.I)[:160]
-                               for l in cal._data(ev).splitlines() if l.upper().startswith(("ATTENDEE", "ORGANIZER", "UID"))]
-                        log(f"  calendário: já existe {title} {fmt_pt(d, start)} — convidar_ana={convidar_ana} | " + " || ".join(att))
+                        log(f"  calendário: já existe {title} {fmt_pt(d, start)}")
                         continue
                     ev.delete()  # título ou convidados mudaram: recria
                     log(f"  calendário: atualizando {c['name']} {fmt_pt(d, start)}"
