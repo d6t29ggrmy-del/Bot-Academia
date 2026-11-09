@@ -491,6 +491,24 @@ def diagnostico():
         page.set_default_timeout(30000)
         try:
             login(page)
+            links = page.evaluate("""() => [...document.querySelectorAll('a')].map(a => (a.innerText.trim() + ' -> ' + a.getAttribute('href')))
+                .filter(t => /reserv|schedule|my |calendar|class/i.test(t))""")
+            log("Links: " + " | ".join(links[:40]))
+            for texto in ["Reservations"]:
+                try:
+                    page.locator("a", has_text=re.compile(rf"^\s*{texto}\s*$")).first.click()
+                    page.wait_for_load_state("networkidle")
+                    time.sleep(3)
+                    log(f"Página {texto}: {page.url}")
+                    corpo = page.evaluate("() => document.body.innerText.replace(/\\s+/g, ' ')")
+                    for k in range(0, min(len(corpo), 6000), 1500):
+                        log("TEXTO " + corpo[k:k + 1500])
+                    html = page.evaluate("() => (document.querySelector('#content, .content, main') || document.body).innerHTML.replace(/\\s+/g, ' ')")
+                    for k in range(0, min(len(html), 9000), 1500):
+                        log("HTML " + html[k:k + 1500])
+                except Exception as e:
+                    log(f"Falhou {texto}: {e}")
+            return
             for c in CFG["classes"]:
                 open_event(page, c["event_id"])
                 rows = read_rows(page)
