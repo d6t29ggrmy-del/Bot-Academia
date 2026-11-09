@@ -494,9 +494,9 @@ def diagnostico():
             links = page.evaluate("""() => [...document.querySelectorAll('a')].map(a => (a.innerText.trim() + ' -> ' + a.getAttribute('href')))
                 .filter(t => /reserv|schedule|my |calendar|class/i.test(t))""")
             log("Links: " + " | ".join(links[:40]))
-            for texto in ["Reservations"]:
+            for texto in ["/member", "/member/info", "/calendar/classes", "/member/register-for-classes"]:
                 try:
-                    page.locator("a", has_text=re.compile(rf"^\s*{texto}\s*$")).first.click()
+                    page.goto(BASE + texto, wait_until="domcontentloaded")
                     page.wait_for_load_state("networkidle")
                     time.sleep(3)
                     log(f"Página {texto}: {page.url}")
