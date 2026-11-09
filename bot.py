@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.3 — aula lotada/fechada ("Full"/"Closed"): confere a inscrição em MY EVENTS da página inicial do portal
 v2.2 — atualiza também eventos achados pelo horário (sem o UID do robô)
 v2.1 — quem cancelou sai do evento do calendário (a Ana deixa de ser convidada); cancelar segue com a rodada normal
 v2.0 — função "Cancelar aulas": cancela inscrições no portal sob pedido (entrada "cancelar" do workflow)
@@ -491,24 +492,6 @@ def diagnostico():
         page.set_default_timeout(30000)
         try:
             login(page)
-            links = page.evaluate("""() => [...document.querySelectorAll('a')].map(a => (a.innerText.trim() + ' -> ' + a.getAttribute('href')))
-                .filter(t => /reserv|schedule|my |calendar|class/i.test(t))""")
-            log("Links: " + " | ".join(links[:40]))
-            for texto in ["/member", "/member/info", "/calendar/classes", "/member/register-for-classes"]:
-                try:
-                    page.goto(BASE + texto, wait_until="domcontentloaded")
-                    page.wait_for_load_state("networkidle")
-                    time.sleep(3)
-                    log(f"Página {texto}: {page.url}")
-                    corpo = page.evaluate("() => document.body.innerText.replace(/\\s+/g, ' ')")
-                    for k in range(0, min(len(corpo), 6000), 1500):
-                        log("TEXTO " + corpo[k:k + 1500])
-                    html = page.evaluate("() => (document.querySelector('#content, .content, main') || document.body).innerHTML.replace(/\\s+/g, ' ')")
-                    for k in range(0, min(len(html), 9000), 1500):
-                        log("HTML " + html[k:k + 1500])
-                except Exception as e:
-                    log(f"Falhou {texto}: {e}")
-            return
             for c in CFG["classes"]:
                 open_event(page, c["event_id"])
                 rows = read_rows(page)
@@ -543,6 +526,39 @@ def diagnostico():
                 break
         finally:
             browser.close()
+
+
+# ---------------------------------------------------------------- MY EVENTS (página inicial)
+def minhas_aulas(page, today):
+    """Lê a lista MY EVENTS da página inicial do portal (inscrições do Jaime).
+    Retorna um conjunto de (data, 'hh:mmam/pm') ou None se não conseguir ler."""
+    try:
+        page.goto(f"{BASE}/member", wait_until="domcontentloaded")
+        page.wait_for_load_state("networkidle")
+        try:
+            page.locator("text=/^\\s*Next month\\s*$/").first.click(timeout=5000)
+            page.wait_for_load_state("networkidle")
+            time.sleep(2)
+        except Exception:
+            pass
+        texto = page.evaluate("() => document.body.innerText.replace(/\\s+/g, ' ')")
+        if "MY EVENTS" not in texto:
+            log("  MY EVENTS não encontrado na página inicial")
+            return None
+        trecho = texto.split("MY EVENTS", 1)[1].split("MY REGISTRATIONS", 1)[0]
+        meses = {m[:3].upper(): i for m, i in MONTHS.items()}
+        achados = set()
+        for mes, dia, hora in re.findall(r"\b([A-Z]{3}) (\d{1,2}) .+?(\d{1,2}:\d{2}[ap]m) - ", trecho):
+            if mes not in meses:
+                continue
+            ano = today.year + (1 if meses[mes] < today.month else 0)
+            hora = hora.lower().zfill(7)
+            achados.add((date(ano, meses[mes], int(dia)), hora))
+        log(f"  MY EVENTS: {len(achados)} aula(s) do Jaime")
+        return achados
+    except Exception as e:
+        log(f"  não consegui ler MY EVENTS ({e})")
+        return None
 
 
 # ---------------------------------------------------------------- cancelar aulas (sob pedido)
@@ -729,6 +745,7 @@ def main():
     problems += [f"Cancelamento: {f}" for f in falhas_cancelar]
     estado = carregar_estado()
     to_remove = []  # (c, d, start) — todos desmarcaram: apagar evento do calendário
+    travadas = []   # aulas com botão Full/Closed: inscrição conferida em MY EVENTS
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -827,10 +844,36 @@ def main():
                                 to_remove.append((c, d, start))
                         elif all_ok or DRY_RUN:
                             to_calendar.append((c, d, start, end, description, *tipo_evento(presentes, inscritos)))
-                    elif "full" in r["cls"].lower() or re.search(r"full", status, re.I):
-                        log("    lotada, sem lista de espera — nada a fazer")
+                    elif re.search(r"^\s*(Full|Closed)\s*$", status, re.I):
+                        log("    botão travado (lotada/fechada) — vou conferir em MY EVENTS")
+                        travadas.append((c, d, start, end, description))
                     else:
                         log("    ainda não abriu")
+            if travadas:
+                minhas = minhas_aulas(page, today)
+                for c, d, start, end, description in travadas:
+                    chave = f"{c['event_id']}-{d:%Y%m%d}"
+                    info = estado.get(chave)
+                    if minhas is None or not info:
+                        continue  # sem como conferir ou aula que nunca marcamos: não mexe
+                    label = f"{c['name']} {fmt_pt(d, start)}"
+                    sit = info.get("situacao", {})
+                    jaime_ok = (d, start) in minhas
+                    if not jaime_ok and "Jaime" in sit and "Jaime" not in info["desmarcados"]:
+                        log(f"  {label}: Jaime não aparece mais em MY EVENTS — desmarcação, não reinscrever")
+                        info["desmarcados"].append("Jaime")
+                    presentes = (["Jaime"] if jaime_ok else []) + [
+                        n for n in sit if n != "Jaime" and n not in info["desmarcados"]]
+                    inscritos = [n for n in presentes if n == "Jaime" or sit.get(n) == "inscrito"]
+                    if jaime_ok:
+                        log(f"  {label}: Jaime confirmado em MY EVENTS")
+                    if not DRY_RUN:
+                        info["situacao"] = {n: ("inscrito" if n in inscritos else "espera") for n in presentes}
+                    if not presentes:
+                        if info["desmarcados"]:
+                            to_remove.append((c, d, start))
+                    else:
+                        to_calendar.append((c, d, start, end, description, *tipo_evento(presentes, inscritos)))
         except Exception as e:
             shot(page, "erro-geral")
             problems.append(f"Erro geral: {e}")
