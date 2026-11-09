@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.4 — números de telefone escondidos no log
 v2.3 — aula lotada/fechada ("Full"/"Closed"): confere a inscrição em MY EVENTS da página inicial do portal
 v2.2 — atualiza também eventos achados pelo horário (sem o UID do robô)
 v2.1 — quem cancelou sai do evento do calendário (a Ana deixa de ser convidada); cancelar segue com a rodada normal
@@ -112,6 +113,7 @@ def whatsapp(text, only_jaime=False):
             txt = re.sub(r"\s+", " ", txt).strip()
             if key:
                 txt = txt.replace(key, "***")
+            txt = re.sub(r"\+?\d[\d\s().-]{7,}\d", "***", txt)  # esconde números de telefone no log
             log(f"WhatsApp {who}: HTTP {r.status_code} — {txt[:200]}")
         except Exception as e:  # noqa
             log(f"WhatsApp {who}: falhou ({e})")
