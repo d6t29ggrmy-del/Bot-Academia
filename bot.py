@@ -494,6 +494,19 @@ def diagnostico():
         page.set_default_timeout(30000)
         try:
             login(page)
+            if os.getenv("DIAG_MY_EVENTS", "true") == "true":
+                minhas_aulas(page, datetime.now(TZ).date())
+                html = page.evaluate("""() => {
+                    const all = [...document.querySelectorAll('a')].filter(a => /^\\s*Unregister\\s*$/.test(a.innerText));
+                    if (!all.length) return 'sem links Unregister';
+                    let el = all[0];
+                    while (el.parentElement && el.parentElement.querySelectorAll('a').length <= all.length + 2
+                           && !/MY REGISTRATIONS|CLUB ANNOUNCEMENTS/.test(el.parentElement.innerText)) el = el.parentElement;
+                    return el.outerHTML.replace(/\\s+/g, ' ');
+                }""")
+                for k in range(0, min(len(html), 6000), 1500):
+                    log("MYEV " + html[k:k + 1500])
+                return
             for c in CFG["classes"]:
                 open_event(page, c["event_id"])
                 rows = read_rows(page)
