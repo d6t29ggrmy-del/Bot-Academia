@@ -1,5 +1,6 @@
 """
 Bot Academia — Walton Family Whole Health & Fitness (Club Automation)
+v2.5 — cancelar aula lotada (janela travada) pelo Unregister da lista MY EVENTS
 v2.4 — números de telefone escondidos no log
 v2.3 — aula lotada/fechada ("Full"/"Closed"): confere a inscrição em MY EVENTS da página inicial do portal
 v2.2 — atualiza também eventos achados pelo horário (sem o UID do robô)
@@ -494,19 +495,6 @@ def diagnostico():
         page.set_default_timeout(30000)
         try:
             login(page)
-            if os.getenv("DIAG_MY_EVENTS", "true") == "true":
-                minhas_aulas(page, datetime.now(TZ).date())
-                html = page.evaluate("""() => {
-                    const all = [...document.querySelectorAll('a')].filter(a => /^\\s*Unregister\\s*$/.test(a.innerText));
-                    if (!all.length) return 'sem links Unregister';
-                    let el = all[0];
-                    while (el.parentElement && el.parentElement.querySelectorAll('a').length <= all.length + 2
-                           && !/MY REGISTRATIONS|CLUB ANNOUNCEMENTS/.test(el.parentElement.innerText)) el = el.parentElement;
-                    return el.outerHTML.replace(/\\s+/g, ' ');
-                }""")
-                for k in range(0, min(len(html), 6000), 1500):
-                    log("MYEV " + html[k:k + 1500])
-                return
             for c in CFG["classes"]:
                 open_event(page, c["event_id"])
                 rows = read_rows(page)
@@ -611,6 +599,47 @@ def _botoes_visiveis(page):
         .filter(t => !/\\[\\]$/.test(t)).slice(-30)""")
 
 
+def _confirmar_no_site(page):
+    """Depois de clicar em Unregister: clica numa confirmação dentro da página, se aparecer."""
+    page.wait_for_load_state("networkidle")
+    time.sleep(2)
+    log("  depois do Unregister, botões visíveis: " + " | ".join(_botoes_visiveis(page)))
+    conf = page.locator("a:visible, button:visible, input:visible", has_text=re.compile(
+        r"^\s*(Yes|OK|Confirm|Unregister|Continue)\b", re.I))
+    try:
+        for k in range(conf.count()):
+            el = conf.nth(k)
+            if "unregister-link" in (el.get_attribute("class") or ""):
+                continue
+            log(f"  clicando na confirmação: {el.inner_text().strip()[:30]}")
+            el.click()
+            page.wait_for_load_state("networkidle")
+            time.sleep(2)
+            break
+    except Exception as e:
+        log(f"  aviso na confirmação: {e}")
+
+
+def _cancelar_por_my_events(page, c, d, today):
+    """Aula lotada: a janela não abre, mas MY EVENTS (página inicial) tem Unregister para o Jaime."""
+    if minhas_aulas(page, today) is None:
+        return False
+    mes = d.strftime("%b").upper()
+    link = page.locator("div.day_block").filter(
+        has=page.locator("div.date", has_text=re.compile(rf"{mes}\s*{d.day}\b"))
+    ).locator(f'a.unregister-link[data-event-id="{c["event_id"]}"]').first
+    if link.count() == 0:
+        log("  MY EVENTS: não achei o Unregister dessa aula")
+        return False
+    if DRY_RUN:
+        log("  MY EVENTS: seria cancelado (DRY_RUN)")
+        return True
+    link.click()
+    _confirmar_no_site(page)
+    minhas = minhas_aulas(page, today)
+    return minhas is not None and (d, c["start"].lower()) not in minhas
+
+
 def cancelar(pedidos):
     """pedidos = [{"event_id": 624023, "data": "2026-11-09", "membros": ["Jaime", "Ana Elisa"]}, ...]
     Cancela no portal, marca como desmarcado no estado.json (para não remarcar),
@@ -639,11 +668,21 @@ def cancelar(pedidos):
                     if name not in info["desmarcados"]:
                         info["desmarcados"].append(name)  # mesmo se falhar, o robô não remarca
                 cancelados = []
+                n_falhas = len(falhas)
                 for name in ped["membros"]:
                     if not _abrir_janela(page, c, d):
-                        falhas.append(f"{label}: não consegui abrir a janela da aula")
+                        if name == "Jaime":
+                            log(f"  {label}: janela travada (aula lotada?) — tentando pelo MY EVENTS")
+                            if _cancelar_por_my_events(page, c, d, today):
+                                log(f"  {label} — {name}: cancelado ✔ (MY EVENTS)")
+                                cancelados.append(name)
+                            else:
+                                falhas.append(f"{label} — {name}: não consegui cancelar nem pelo MY EVENTS")
+                                shot(page, "cancelar-my-events")
+                            continue
+                        falhas.append(f"{label} — {name}: a janela da aula não abre (aula lotada) — cancele pelo app")
                         shot(page, "cancelar-janela")
-                        break
+                        continue
                     item = _membro(page, name)
                     cls = (item.get_attribute("class") or "").split() if item.count() else []
                     if "registered" not in cls and "waitlisted" not in cls:
@@ -664,24 +703,7 @@ def cancelar(pedidos):
                         cancelados.append(name)
                         continue
                     link.click()
-                    page.wait_for_load_state("networkidle")
-                    time.sleep(2)
-                    log("  depois do Unregister, botões visíveis: " + " | ".join(_botoes_visiveis(page)))
-                    # confirmação dentro da página (se houver)
-                    conf = page.locator("a:visible, button:visible, input:visible", has_text=re.compile(
-                        r"^\s*(Yes|OK|Confirm|Unregister|Continue)\b", re.I))
-                    try:
-                        for k in range(conf.count()):
-                            el = conf.nth(k)
-                            if "unregister-link" in (el.get_attribute("class") or ""):
-                                continue
-                            log(f"  clicando na confirmação: {el.inner_text().strip()[:30]}")
-                            el.click()
-                            page.wait_for_load_state("networkidle")
-                            time.sleep(2)
-                            break
-                    except Exception as e:
-                        log(f"  aviso na confirmação: {e}")
+                    _confirmar_no_site(page)
                     # verificação: reabre a janela e confere o nome
                     page.keyboard.press("Escape")
                     if _abrir_janela(page, c, d):
@@ -696,7 +718,7 @@ def cancelar(pedidos):
                 if cancelados:
                     feitos.append((label, cancelados))
                 restantes = [n for n in CFG["members"] if n not in info["desmarcados"]]
-                if not restantes or set(cancelados) >= set(CFG["members"]):
+                if len(falhas) == n_falhas and (not restantes or set(cancelados) >= set(CFG["members"])):
                     apagar.append((c, d))
         except Exception as e:
             shot(page, "cancelar-erro")
