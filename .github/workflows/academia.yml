@@ -59,7 +59,15 @@ jobs:
           key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
  
       - name: Instalar Chromium
-        run: python -m playwright install --with-deps chromium
+        run: |
+          # tenta 3 vezes com as dependências do sistema; se os servidores do Ubuntu estiverem fora,
+          # segue só com o navegador (o runner já tem quase tudo que o Chromium precisa)
+          for i in 1 2 3; do
+            python -m playwright install --with-deps chromium && exit 0
+            echo "Falhou a tentativa $i — nova tentativa em 20s"; sleep 20
+          done
+          echo "::warning::Dependências do sistema indisponíveis — instalando só o Chromium"
+          python -m playwright install chromium
  
       - name: Rodar robo
         env:
