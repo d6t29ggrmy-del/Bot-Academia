@@ -11,11 +11,11 @@
     ]
   },
   "624023-20261116": {
-    "desmarcados": [],
-    "situacao": {
-      "Ana Elisa": "inscrito",
-      "Jaime": "inscrito"
-    },
+    "desmarcados": [
+      "Jaime",
+      "Ana Elisa"
+    ],
+    "situacao": {},
     "vistos": [
       "Ana Elisa",
       "Jaime"
