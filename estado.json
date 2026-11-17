@@ -33,11 +33,11 @@
     ]
   },
   "626548-20261119": {
-    "desmarcados": [],
-    "situacao": {
-      "Ana Elisa": "inscrito",
-      "Jaime": "inscrito"
-    },
+    "desmarcados": [
+      "Jaime",
+      "Ana Elisa"
+    ],
+    "situacao": {},
     "vistos": [
       "Ana Elisa",
       "Jaime"
@@ -56,11 +56,11 @@
     ]
   },
   "829304-20261118": {
-    "desmarcados": [],
-    "situacao": {
-      "Ana Elisa": "inscrito",
-      "Jaime": "inscrito"
-    },
+    "desmarcados": [
+      "Jaime",
+      "Ana Elisa"
+    ],
+    "situacao": {},
     "vistos": [
       "Ana Elisa",
       "Jaime"
